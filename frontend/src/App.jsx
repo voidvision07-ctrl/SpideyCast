@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import ReactPlayer from 'react-player';
 import { io } from 'socket.io-client';
 import { motion } from 'framer-motion';
+import Peer from 'peerjs';
 import { 
   Send, Users, Tv, MessageSquare, Plus, LogIn, Film, Monitor, MonitorOff 
 } from 'lucide-react';
@@ -30,11 +31,12 @@ export default function App() {
   const playerRef = useRef(null);
 
   // WebRTC Screen Share State
-  const [screenStream, setScreenStream] = useState(null);
   const [isSharingScreen, setIsSharingScreen] = useState(false);
   const screenVideoRef = useRef(null);
+  const peerInstance = useRef(null);
+  const localStreamRef = useRef(null);
 
-  // Helper function to safely get current player time across ReactPlayer and HTML5 Video
+  // Helper function to safely get current player time
   const getPlayerTime = () => {
     if (!playerRef.current) return 0;
     if (typeof playerRef.current.getCurrentTime === 'function') {
@@ -47,6 +49,21 @@ export default function App() {
   };
 
   useEffect(() => {
+    // Initialize PeerJS instance for P2P connection
+    const peer = new Peer();
+    peerInstance.current = peer;
+
+    // Listen for incoming calls (for Guest devices receiving stream)
+    peer.on('call', (call) => {
+      call.answer(); // Answer incoming stream call
+      call.on('stream', (remoteStream) => {
+        setIsSharingScreen(true);
+        if (screenVideoRef.current) {
+          screenVideoRef.current.srcObject = remoteStream;
+        }
+      });
+    });
+
     // Socket Event Listeners
     socket.on('room_update', (room) => {
       setMembers(room.members);
@@ -78,9 +95,20 @@ export default function App() {
       }
     });
 
-    // Screen Share Listeners
-    socket.on('screen_share_started', () => {
+    // Peer Screen Share Socket Events
+    socket.on('screen_share_started', ({ hostPeerId }) => {
       setIsSharingScreen(true);
+      // Connect to Host's Peer ID to get video feed
+      if (peerInstance.current && hostPeerId) {
+        const call = peerInstance.current.call(hostPeerId, null);
+        if (call) {
+          call.on('stream', (remoteStream) => {
+            if (screenVideoRef.current) {
+              screenVideoRef.current.srcObject = remoteStream;
+            }
+          });
+        }
+      }
     });
 
     socket.on('screen_share_stopped', () => {
@@ -91,6 +119,7 @@ export default function App() {
     });
 
     return () => {
+      peer.destroy();
       socket.off('room_update');
       socket.off('receive_message');
       socket.off('video_source_changed');
@@ -99,13 +128,6 @@ export default function App() {
       socket.off('screen_share_stopped');
     };
   }, [videoUrl]);
-
-  // Handle Screen Stream Assignment to Video Ref
-  useEffect(() => {
-    if (screenStream && screenVideoRef.current) {
-      screenVideoRef.current.srcObject = screenStream;
-    }
-  }, [screenStream, isSharingScreen]);
 
   // Handlers
   const handleCreateRoom = () => {
@@ -145,7 +167,6 @@ export default function App() {
     
     let processedUrl = cloudInputUrl.trim();
 
-    // 1. Google Drive Formatting
     if (processedUrl.includes('drive.google.com')) {
       if (processedUrl.includes('/view')) {
         processedUrl = processedUrl.replace('/view', '/preview');
@@ -155,12 +176,10 @@ export default function App() {
       }
     }
 
-    // 2. TeraBox Formatting
     if (processedUrl.includes('terabox.com') || processedUrl.includes('1024tera.com')) {
       processedUrl = processedUrl.replace('terabox.com', 'terabox.app/embed');
     }
 
-    // 3. YouTube Standardization
     if (processedUrl.includes('youtube.com/embed/')) {
       const videoId = processedUrl.split('youtube.com/embed/')[1].split('?')[0];
       processedUrl = `https://www.youtube.com/watch?v=${videoId}`;
@@ -173,7 +192,7 @@ export default function App() {
     setCloudInputUrl('');
   };
 
-  // Screen Sharing Functions (Host Only)
+  // WebRTC Screen Share Functions
   const startScreenShare = async () => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
@@ -181,37 +200,47 @@ export default function App() {
         audio: true
       });
 
-      setScreenStream(stream);
+      localStreamRef.current = stream;
       setIsSharingScreen(true);
 
-      socket.emit('start_screen_share', { roomId });
+      if (screenVideoRef.current) {
+        screenVideoRef.current.srcObject = stream;
+      }
 
-      // Handle user clicking "Stop Sharing" on standard browser banner
+      // Notify peer connections when called
+      peerInstance.current.on('call', (call) => {
+        call.answer(stream);
+      });
+
+      // Send host Peer ID to all room members
+      socket.emit('start_screen_share', { 
+        roomId, 
+        hostPeerId: peerInstance.current.id 
+      });
+
       stream.getVideoTracks()[0].onended = () => {
         stopScreenShare();
       };
     } catch (err) {
-      console.error("Screen sharing cancelled or failed:", err);
+      console.error("Screen share failed:", err);
     }
   };
 
   const stopScreenShare = () => {
-    if (screenStream) {
-      screenStream.getTracks().forEach((track) => track.stop());
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => track.stop());
     }
-    setScreenStream(null);
+    localStreamRef.current = null;
     setIsSharingScreen(false);
     socket.emit('stop_screen_share', { roomId });
   };
 
-  // Sync Event Actions
+  // Video Actions Sync
   const handlePlay = () => {
     setPlaying(true);
     if (isHost) {
       socket.emit('sync_video_action', { 
-        roomId, 
-        action: 'play', 
-        currentTime: getPlayerTime() 
+        roomId, action: 'play', currentTime: getPlayerTime() 
       });
     }
   };
@@ -220,9 +249,7 @@ export default function App() {
     setPlaying(false);
     if (isHost) {
       socket.emit('sync_video_action', { 
-        roomId, 
-        action: 'pause', 
-        currentTime: getPlayerTime() 
+        roomId, action: 'pause', currentTime: getPlayerTime() 
       });
     }
   };
@@ -237,7 +264,6 @@ export default function App() {
     }
   };
 
-  // Helper check for embed-only cloud services (Drive / TeraBox)
   const isEmbedUrl = videoUrl.includes('drive.google.com') || videoUrl.includes('tera');
 
   return (
@@ -270,7 +296,6 @@ export default function App() {
 
       {/* Main Content View */}
       {!inRoom ? (
-        // JOIN / CREATE ROOM MODAL
         <main className="relative z-10 flex-1 flex items-center justify-center p-6">
           <motion.div 
             initial={{ scale: 0.9, opacity: 0 }}
@@ -338,25 +363,23 @@ export default function App() {
           </motion.div>
         </main>
       ) : (
-        // DASHBOARD VIEW (VIDEO PLAYER + MEMBERS + CHAT)
         <main className="relative z-10 flex-1 grid grid-cols-1 lg:grid-cols-4 gap-6 p-6 h-[calc(100vh-80px)]">
-          
           {/* VIDEO STAGE */}
           <section className="lg:col-span-3 flex flex-col space-y-4">
             <div className="relative flex-1 bg-black/80 rounded-3xl border border-spidey-red/30 overflow-hidden shadow-2xl flex items-center justify-center min-h-[400px]">
               
-              {/* 1. WebRTC Screen Share View */}
               {isSharingScreen ? (
+                /* Mobile & Desktop Native WebRTC Player */
                 <video
                   ref={screenVideoRef}
                   autoPlay
                   playsInline
+                  muted={isHost} // Mute for host locally to prevent echo
                   controls={!isHost}
                   className="w-full h-full object-contain"
                 />
               ) : videoUrl ? (
                 isEmbedUrl ? (
-                  // 2. Google Drive / TeraBox Embed Player
                   <div className="relative w-full h-full">
                     {!isHost && (
                       <div 
@@ -372,7 +395,6 @@ export default function App() {
                     />
                   </div>
                 ) : (
-                  // 3. Universal React Player (YouTube, Direct MP4, WebM, HLS)
                   <ReactPlayer
                     ref={playerRef}
                     url={videoUrl}
@@ -386,7 +408,6 @@ export default function App() {
                   />
                 )
               ) : (
-                // 4. Empty State
                 <div className="text-center p-8">
                   <Film className="w-16 h-16 text-spidey-red animate-pulse mx-auto mb-4" />
                   <p className="text-xl font-bold text-gray-300">No Stream Active</p>
@@ -400,7 +421,6 @@ export default function App() {
             {/* HOST CONTROLLER PANEL */}
             {isHost && (
               <div className="flex flex-col md:flex-row space-y-3 md:space-y-0 md:space-x-3 bg-spidey-card/90 p-4 rounded-2xl border border-spidey-red/30">
-                {/* Link Casting Input */}
                 <form onSubmit={handleSetCloudVideo} className="flex-1 flex space-x-2">
                   <input 
                     type="url"
@@ -418,7 +438,6 @@ export default function App() {
                   </button>
                 </form>
 
-                {/* Screen Share Toggle */}
                 {!isSharingScreen ? (
                   <button 
                     onClick={startScreenShare}
@@ -440,10 +459,8 @@ export default function App() {
             )}
           </section>
 
-          {/* SIDE PANEL: MEMBERS & CHAT */}
+          {/* SIDE PANEL */}
           <aside className="flex flex-col space-y-4 h-full overflow-hidden">
-            
-            {/* Active Members Card */}
             <div className="bg-spidey-card/80 p-4 rounded-2xl border border-spidey-red/20 backdrop-blur-md">
               <div className="flex items-center space-x-2 text-xs font-bold text-spidey-cyan mb-3 uppercase tracking-wider">
                 <Users className="w-4 h-4" />
@@ -465,14 +482,12 @@ export default function App() {
               </div>
             </div>
 
-            {/* Real-time Chat Container */}
             <div className="flex-1 bg-spidey-card/80 p-4 rounded-2xl border border-spidey-red/20 backdrop-blur-md flex flex-col overflow-hidden">
               <div className="flex items-center space-x-2 text-xs font-bold text-gray-400 mb-3 uppercase tracking-wider">
                 <MessageSquare className="w-4 h-4 text-spidey-red" />
                 <span>Live Multiverse Chat</span>
               </div>
 
-              {/* Chat Messages List */}
               <div className="flex-1 overflow-y-auto space-y-3 pr-2 mb-3">
                 {messages.map((msg) => (
                   <div key={msg.id} className="bg-black/40 p-3 rounded-xl border border-gray-800/60 text-xs">
@@ -485,7 +500,6 @@ export default function App() {
                 ))}
               </div>
 
-              {/* Input Form */}
               <form onSubmit={handleSendMessage} className="flex space-x-2">
                 <input 
                   type="text"

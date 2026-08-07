@@ -107,13 +107,14 @@ io.on('connection', (socket) => {
   });
 
   // WebRTC Screen Share Handlers (Host Only)
-  socket.on('start_screen_share', ({ roomId }) => {
-    const room = rooms.get(roomId);
-    if (room && room.hostId === socket.id) {
-      room.isSharingScreen = true;
-      socket.to(roomId).emit('screen_share_started');
-    }
-  });
+ // WebRTC Screen Share Handlers
+socket.on('start_screen_share', ({ roomId, hostPeerId }) => {
+  const room = rooms.get(roomId);
+  if (room && room.hostId === socket.id) {
+    room.isSharingScreen = true;
+    socket.to(roomId).emit('screen_share_started', { hostPeerId });
+  }
+});
 
   socket.on('stop_screen_share', ({ roomId }) => {
     const room = rooms.get(roomId);
