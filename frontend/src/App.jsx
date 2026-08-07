@@ -29,6 +29,18 @@ export default function App() {
   const [playing, setPlaying] = useState(true);
   const playerRef = useRef(null);
 
+  // Helper function to safely get current player time across ReactPlayer and HTML5 Video
+  const getPlayerTime = () => {
+    if (!playerRef.current) return 0;
+    if (typeof playerRef.current.getCurrentTime === 'function') {
+      return playerRef.current.getCurrentTime();
+    }
+    if (typeof playerRef.current.currentTime === 'number') {
+      return playerRef.current.currentTime;
+    }
+    return 0;
+  };
+
   useEffect(() => {
     // Socket Event Listeners
     socket.on('room_update', (room) => {
@@ -48,8 +60,13 @@ export default function App() {
 
     socket.on('apply_video_action', ({ action, currentTime }) => {
       if (playerRef.current) {
-        if (Math.abs(playerRef.current.getCurrentTime() - currentTime) > 1.5) {
-          playerRef.current.seekTo(currentTime, 'seconds');
+        const time = getPlayerTime();
+        if (Math.abs(time - currentTime) > 1.5) {
+          if (typeof playerRef.current.seekTo === 'function') {
+            playerRef.current.seekTo(currentTime, 'seconds');
+          } else if ('currentTime' in playerRef.current) {
+            playerRef.current.currentTime = currentTime;
+          }
         }
         if (action === 'play') setPlaying(true);
         if (action === 'pause') setPlaying(false);
@@ -124,32 +141,32 @@ export default function App() {
   // Sync Event Actions
   const handlePlay = () => {
     setPlaying(true);
-    if (isHost && playerRef.current) {
+    if (isHost) {
       socket.emit('sync_video_action', { 
         roomId, 
         action: 'play', 
-        currentTime: playerRef.current.getCurrentTime() 
+        currentTime: getPlayerTime() 
       });
     }
   };
 
   const handlePause = () => {
     setPlaying(false);
-    if (isHost && playerRef.current) {
+    if (isHost) {
       socket.emit('sync_video_action', { 
         roomId, 
         action: 'pause', 
-        currentTime: playerRef.current.getCurrentTime() 
+        currentTime: getPlayerTime() 
       });
     }
   };
 
   const handleSeek = (seconds) => {
-    if (isHost && playerRef.current) {
+    if (isHost) {
       socket.emit('sync_video_action', { 
         roomId, 
         action: 'seek', 
-        currentTime: seconds 
+        currentTime: typeof seconds === 'number' ? seconds : getPlayerTime() 
       });
     }
   };
