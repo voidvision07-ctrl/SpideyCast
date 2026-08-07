@@ -3,7 +3,7 @@ import ReactPlayer from 'react-player';
 import { io } from 'socket.io-client';
 import { motion } from 'framer-motion';
 import { 
-  Send, Users, Tv, MessageSquare, Plus, LogIn, Film 
+  Send, Users, Tv, MessageSquare, Plus, LogIn, Film, Monitor, MonitorOff 
 } from 'lucide-react';
 import Background3D from './components/Background3D';
 import { playSFX } from './utils/sfx';
@@ -29,6 +29,11 @@ export default function App() {
   const [playing, setPlaying] = useState(true);
   const playerRef = useRef(null);
 
+  // WebRTC Screen Share State
+  const [screenStream, setScreenStream] = useState(null);
+  const [isSharingScreen, setIsSharingScreen] = useState(false);
+  const screenVideoRef = useRef(null);
+
   // Helper function to safely get current player time across ReactPlayer and HTML5 Video
   const getPlayerTime = () => {
     if (!playerRef.current) return 0;
@@ -45,7 +50,7 @@ export default function App() {
     // Socket Event Listeners
     socket.on('room_update', (room) => {
       setMembers(room.members);
-      if (room.videoState.url && !videoUrl) {
+      if (room.videoState?.url && !videoUrl) {
         setVideoUrl(room.videoState.url);
       }
     });
@@ -73,13 +78,34 @@ export default function App() {
       }
     });
 
+    // Screen Share Listeners
+    socket.on('screen_share_started', () => {
+      setIsSharingScreen(true);
+    });
+
+    socket.on('screen_share_stopped', () => {
+      setIsSharingScreen(false);
+      if (screenVideoRef.current) {
+        screenVideoRef.current.srcObject = null;
+      }
+    });
+
     return () => {
       socket.off('room_update');
       socket.off('receive_message');
       socket.off('video_source_changed');
       socket.off('apply_video_action');
+      socket.off('screen_share_started');
+      socket.off('screen_share_stopped');
     };
   }, [videoUrl]);
+
+  // Handle Screen Stream Assignment to Video Ref
+  useEffect(() => {
+    if (screenStream && screenVideoRef.current) {
+      screenVideoRef.current.srcObject = screenStream;
+    }
+  }, [screenStream, isSharingScreen]);
 
   // Handlers
   const handleCreateRoom = () => {
@@ -119,7 +145,7 @@ export default function App() {
     
     let processedUrl = cloudInputUrl.trim();
 
-    // Auto-convert Google Drive view links to preview embed
+    // 1. Google Drive Formatting
     if (processedUrl.includes('drive.google.com')) {
       if (processedUrl.includes('/view')) {
         processedUrl = processedUrl.replace('/view', '/preview');
@@ -129,13 +155,53 @@ export default function App() {
       }
     }
 
-    // Auto-convert TeraBox share links to embed format
+    // 2. TeraBox Formatting
     if (processedUrl.includes('terabox.com') || processedUrl.includes('1024tera.com')) {
       processedUrl = processedUrl.replace('terabox.com', 'terabox.app/embed');
     }
 
+    // 3. YouTube Standardization
+    if (processedUrl.includes('youtube.com/embed/')) {
+      const videoId = processedUrl.split('youtube.com/embed/')[1].split('?')[0];
+      processedUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    } else if (processedUrl.includes('youtu.be/')) {
+      const videoId = processedUrl.split('youtu.be/')[1].split('?')[0];
+      processedUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    }
+
     socket.emit('update_video_source', { roomId, url: processedUrl });
     setCloudInputUrl('');
+  };
+
+  // Screen Sharing Functions (Host Only)
+  const startScreenShare = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { cursor: "always" },
+        audio: true
+      });
+
+      setScreenStream(stream);
+      setIsSharingScreen(true);
+
+      socket.emit('start_screen_share', { roomId });
+
+      // Handle user clicking "Stop Sharing" on standard browser banner
+      stream.getVideoTracks()[0].onended = () => {
+        stopScreenShare();
+      };
+    } catch (err) {
+      console.error("Screen sharing cancelled or failed:", err);
+    }
+  };
+
+  const stopScreenShare = () => {
+    if (screenStream) {
+      screenStream.getTracks().forEach((track) => track.stop());
+    }
+    setScreenStream(null);
+    setIsSharingScreen(false);
+    socket.emit('stop_screen_share', { roomId });
   };
 
   // Sync Event Actions
@@ -278,17 +344,35 @@ export default function App() {
           {/* VIDEO STAGE */}
           <section className="lg:col-span-3 flex flex-col space-y-4">
             <div className="relative flex-1 bg-black/80 rounded-3xl border border-spidey-red/30 overflow-hidden shadow-2xl flex items-center justify-center min-h-[400px]">
-              {videoUrl ? (
+              
+              {/* 1. WebRTC Screen Share View */}
+              {isSharingScreen ? (
+                <video
+                  ref={screenVideoRef}
+                  autoPlay
+                  playsInline
+                  controls={!isHost}
+                  className="w-full h-full object-contain"
+                />
+              ) : videoUrl ? (
                 isEmbedUrl ? (
-                  // Google Drive / TeraBox Embed Player
-                  <iframe
-                    src={videoUrl}
-                    className="w-full h-full border-0"
-                    allow="autoplay; fullscreen"
-                    title="SpideyCast Stream"
-                  />
+                  // 2. Google Drive / TeraBox Embed Player
+                  <div className="relative w-full h-full">
+                    {!isHost && (
+                      <div 
+                        className="absolute inset-0 z-20 bg-transparent" 
+                        onClick={(e) => e.stopPropagation()} 
+                      />
+                    )}
+                    <iframe
+                      src={videoUrl}
+                      className="w-full h-full border-0"
+                      allow="autoplay; fullscreen"
+                      title="SpideyCast Stream"
+                    />
+                  </div>
                 ) : (
-                  // Universal React Player (YouTube, Direct MP4, WebM, HLS)
+                  // 3. Universal React Player (YouTube, Direct MP4, WebM, HLS)
                   <ReactPlayer
                     ref={playerRef}
                     url={videoUrl}
@@ -302,11 +386,12 @@ export default function App() {
                   />
                 )
               ) : (
+                // 4. Empty State
                 <div className="text-center p-8">
                   <Film className="w-16 h-16 text-spidey-red animate-pulse mx-auto mb-4" />
                   <p className="text-xl font-bold text-gray-300">No Stream Active</p>
                   <p className="text-sm text-gray-500 mt-1">
-                    {isHost ? 'Paste a YouTube, Google Drive, or MP4 link below.' : 'Waiting for host to play video...'}
+                    {isHost ? 'Paste a video link below or click Share Screen.' : 'Waiting for host to stream...'}
                   </p>
                 </div>
               )}
@@ -314,22 +399,44 @@ export default function App() {
 
             {/* HOST CONTROLLER PANEL */}
             {isHost && (
-              <form onSubmit={handleSetCloudVideo} className="flex space-x-3 bg-spidey-card/90 p-4 rounded-2xl border border-spidey-red/30">
-                <input 
-                  type="url"
-                  value={cloudInputUrl}
-                  onChange={(e) => setCloudInputUrl(e.target.value)}
-                  placeholder="Paste YouTube, Drive, TeraBox, or MP4 link here..."
-                  className="flex-1 bg-black/60 border border-gray-800 px-4 py-2 rounded-xl text-sm focus:outline-none focus:border-spidey-red"
-                />
-                <button 
-                  type="submit"
-                  onMouseEnter={playSFX.hover}
-                  className="px-6 py-2 bg-spidey-red font-bold rounded-xl text-sm shadow-md hover:bg-spidey-darkRed transition"
-                >
-                  Cast Video
-                </button>
-              </form>
+              <div className="flex flex-col md:flex-row space-y-3 md:space-y-0 md:space-x-3 bg-spidey-card/90 p-4 rounded-2xl border border-spidey-red/30">
+                {/* Link Casting Input */}
+                <form onSubmit={handleSetCloudVideo} className="flex-1 flex space-x-2">
+                  <input 
+                    type="url"
+                    value={cloudInputUrl}
+                    onChange={(e) => setCloudInputUrl(e.target.value)}
+                    placeholder="Paste YouTube, Drive, TeraBox, or MP4 link..."
+                    className="flex-1 bg-black/60 border border-gray-800 px-4 py-2 rounded-xl text-sm focus:outline-none focus:border-spidey-red"
+                  />
+                  <button 
+                    type="submit"
+                    onMouseEnter={playSFX.hover}
+                    className="px-6 py-2 bg-spidey-red font-bold rounded-xl text-sm shadow-md hover:bg-spidey-darkRed transition whitespace-nowrap"
+                  >
+                    Cast Video
+                  </button>
+                </form>
+
+                {/* Screen Share Toggle */}
+                {!isSharingScreen ? (
+                  <button 
+                    onClick={startScreenShare}
+                    className="px-5 py-2 bg-spidey-cyan text-black font-bold rounded-xl text-sm shadow-md hover:bg-cyan-400 transition flex items-center justify-center space-x-2"
+                  >
+                    <Monitor className="w-4 h-4" />
+                    <span>Share Screen / Tab</span>
+                  </button>
+                ) : (
+                  <button 
+                    onClick={stopScreenShare}
+                    className="px-5 py-2 bg-red-600 text-white font-bold rounded-xl text-sm shadow-md hover:bg-red-700 transition flex items-center justify-center space-x-2"
+                  >
+                    <MonitorOff className="w-4 h-4" />
+                    <span>Stop Sharing</span>
+                  </button>
+                )}
+              </div>
             )}
           </section>
 

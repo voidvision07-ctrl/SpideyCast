@@ -29,6 +29,7 @@ io.on('connection', (socket) => {
     const roomData = {
       password,
       hostId: socket.id,
+      isSharingScreen: false,
       videoState: { url: '', currentTime: 0, isPlaying: false },
       members: [{ id: socket.id, username, isHost: true }]
     };
@@ -61,7 +62,12 @@ io.on('connection', (socket) => {
     const newMember = { id: socket.id, username, isHost: false };
     room.members.push(newMember);
 
-    callback({ success: true, isHost: false, videoState: room.videoState });
+    callback({ 
+      success: true, 
+      isHost: false, 
+      videoState: room.videoState,
+      isSharingScreen: room.isSharingScreen 
+    });
 
     io.to(roomId).emit('room_update', room);
     io.to(roomId).emit('user_joined', { username });
@@ -77,20 +83,21 @@ io.on('connection', (socket) => {
     });
   });
 
-  // Video Streaming Handlers
+  // Video Streaming Handlers (Host Only)
   socket.on('update_video_source', ({ roomId, url }) => {
     const room = rooms.get(roomId);
     if (room && room.hostId === socket.id) {
       room.videoState.url = url;
       room.videoState.currentTime = 0;
       room.videoState.isPlaying = true;
+      room.isSharingScreen = false; // Reset screen share mode if new link is played
       io.to(roomId).emit('video_source_changed', url);
     }
   });
 
   socket.on('sync_video_action', ({ roomId, action, currentTime }) => {
     const room = rooms.get(roomId);
-    if (room) {
+    if (room && room.hostId === socket.id) {
       room.videoState.currentTime = currentTime;
       if (action === 'play') room.videoState.isPlaying = true;
       if (action === 'pause') room.videoState.isPlaying = false;
@@ -99,16 +106,41 @@ io.on('connection', (socket) => {
     }
   });
 
+  // WebRTC Screen Share Handlers (Host Only)
+  socket.on('start_screen_share', ({ roomId }) => {
+    const room = rooms.get(roomId);
+    if (room && room.hostId === socket.id) {
+      room.isSharingScreen = true;
+      socket.to(roomId).emit('screen_share_started');
+    }
+  });
+
+  socket.on('stop_screen_share', ({ roomId }) => {
+    const room = rooms.get(roomId);
+    if (room && room.hostId === socket.id) {
+      room.isSharingScreen = false;
+      socket.to(roomId).emit('screen_share_stopped');
+    }
+  });
+
   // Disconnection Handler
   socket.on('disconnect', () => {
     const roomId = socket.roomId;
     if (roomId && rooms.has(roomId)) {
       const room = rooms.get(roomId);
+      
+      // If host disconnects during active screen share, stop screen share
+      if (room.hostId === socket.id && room.isSharingScreen) {
+        room.isSharingScreen = false;
+        io.to(roomId).emit('screen_share_stopped');
+      }
+
       room.members = room.members.filter((m) => m.id !== socket.id);
 
       if (room.members.length === 0) {
         rooms.delete(roomId);
       } else {
+        // Re-assign host privileges to next member if host left
         if (room.hostId === socket.id) {
           room.hostId = room.members[0].id;
           room.members[0].isHost = true;
@@ -119,7 +151,7 @@ io.on('connection', (socket) => {
   });
 });
 
-const PORT = 5000;
+const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
-  console.log(`🚀 SpideyCast Backend running on http://localhost:${PORT}`);
+  console.log(`🚀 SpideyCast Backend running on port ${PORT}`);
 });
