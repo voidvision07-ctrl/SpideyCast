@@ -8,7 +8,7 @@ import {
 import Background3D from './components/Background3D';
 import { playSFX } from './utils/sfx';
 
-const socket = io('http://localhost:5000');
+const socket = io('https://spideycast-backend.onrender.com');
 
 export default function App() {
   // Navigation & Auth State
