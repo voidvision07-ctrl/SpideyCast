@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
+import ReactPlayer from 'react-player';
 import { io } from 'socket.io-client';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import { 
-  Play, Pause, Send, Users, Shield, Link as LinkIcon, 
-  Tv, MessageSquare, Plus, LogIn, Volume2, Film 
+  Send, Users, Tv, MessageSquare, Plus, LogIn, Film 
 } from 'lucide-react';
 import Background3D from './components/Background3D';
 import { playSFX } from './utils/sfx';
@@ -26,7 +26,8 @@ export default function App() {
   // Video Sync State
   const [videoUrl, setVideoUrl] = useState('');
   const [cloudInputUrl, setCloudInputUrl] = useState('');
-  const videoRef = useRef(null);
+  const [playing, setPlaying] = useState(true);
+  const playerRef = useRef(null);
 
   useEffect(() => {
     // Socket Event Listeners
@@ -46,12 +47,12 @@ export default function App() {
     });
 
     socket.on('apply_video_action', ({ action, currentTime }) => {
-      if (videoRef.current) {
-        if (Math.abs(videoRef.current.currentTime - currentTime) > 1.5) {
-          videoRef.current.currentTime = currentTime;
+      if (playerRef.current) {
+        if (Math.abs(playerRef.current.getCurrentTime() - currentTime) > 1.5) {
+          playerRef.current.seekTo(currentTime, 'seconds');
         }
-        if (action === 'play') videoRef.current.play();
-        if (action === 'pause') videoRef.current.pause();
+        if (action === 'play') setPlaying(true);
+        if (action === 'pause') setPlaying(false);
       }
     });
 
@@ -99,35 +100,62 @@ export default function App() {
     if (!cloudInputUrl.trim()) return;
     playSFX.click();
     
-    // Convert direct Google Drive or TeraBox shared links into streamable direct links if necessary
-    let processedUrl = cloudInputUrl;
-    if (cloudInputUrl.includes('drive.google.com') && cloudInputUrl.includes('/file/d/')) {
-      const fileId = cloudInputUrl.split('/file/d/')[1].split('/')[0];
-      processedUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
+    let processedUrl = cloudInputUrl.trim();
+
+    // Auto-convert Google Drive view links to preview embed
+    if (processedUrl.includes('drive.google.com')) {
+      if (processedUrl.includes('/view')) {
+        processedUrl = processedUrl.replace('/view', '/preview');
+      } else if (!processedUrl.includes('/preview') && processedUrl.includes('/file/d/')) {
+        const fileId = processedUrl.split('/file/d/')[1].split('/')[0];
+        processedUrl = `https://drive.google.com/file/d/${fileId}/preview`;
+      }
+    }
+
+    // Auto-convert TeraBox share links to embed format
+    if (processedUrl.includes('terabox.com') || processedUrl.includes('1024tera.com')) {
+      processedUrl = processedUrl.replace('terabox.com', 'terabox.app/embed');
     }
 
     socket.emit('update_video_source', { roomId, url: processedUrl });
     setCloudInputUrl('');
   };
 
-  // Synchronized HTML5 Video Events (Host Controlled)
+  // Sync Event Actions
   const handlePlay = () => {
-    if (isHost && videoRef.current) {
-      socket.emit('sync_video_action', { roomId, action: 'play', currentTime: videoRef.current.currentTime });
+    setPlaying(true);
+    if (isHost && playerRef.current) {
+      socket.emit('sync_video_action', { 
+        roomId, 
+        action: 'play', 
+        currentTime: playerRef.current.getCurrentTime() 
+      });
     }
   };
 
   const handlePause = () => {
-    if (isHost && videoRef.current) {
-      socket.emit('sync_video_action', { roomId, action: 'pause', currentTime: videoRef.current.currentTime });
+    setPlaying(false);
+    if (isHost && playerRef.current) {
+      socket.emit('sync_video_action', { 
+        roomId, 
+        action: 'pause', 
+        currentTime: playerRef.current.getCurrentTime() 
+      });
     }
   };
 
-  const handleSeek = () => {
-    if (isHost && videoRef.current) {
-      socket.emit('sync_video_action', { roomId, action: 'seek', currentTime: videoRef.current.currentTime });
+  const handleSeek = (seconds) => {
+    if (isHost && playerRef.current) {
+      socket.emit('sync_video_action', { 
+        roomId, 
+        action: 'seek', 
+        currentTime: seconds 
+      });
     }
   };
+
+  // Helper check for embed-only cloud services (Drive / TeraBox)
+  const isEmbedUrl = videoUrl.includes('drive.google.com') || videoUrl.includes('tera');
 
   return (
     <div className="relative min-h-screen bg-spidey-dark text-white flex flex-col font-sans overflow-hidden">
@@ -232,23 +260,36 @@ export default function App() {
           
           {/* VIDEO STAGE */}
           <section className="lg:col-span-3 flex flex-col space-y-4">
-            <div className="relative flex-1 bg-black/80 rounded-3xl border border-spidey-red/30 overflow-hidden shadow-2xl flex items-center justify-center">
+            <div className="relative flex-1 bg-black/80 rounded-3xl border border-spidey-red/30 overflow-hidden shadow-2xl flex items-center justify-center min-h-[400px]">
               {videoUrl ? (
-                <video 
-                  ref={videoRef}
-                  src={videoUrl}
-                  controls={isHost}
-                  onPlay={handlePlay}
-                  onPause={handlePause}
-                  onSeeked={handleSeek}
-                  className="w-full h-full object-contain"
-                />
+                isEmbedUrl ? (
+                  // Google Drive / TeraBox Embed Player
+                  <iframe
+                    src={videoUrl}
+                    className="w-full h-full border-0"
+                    allow="autoplay; fullscreen"
+                    title="SpideyCast Stream"
+                  />
+                ) : (
+                  // Universal React Player (YouTube, Direct MP4, WebM, HLS)
+                  <ReactPlayer
+                    ref={playerRef}
+                    url={videoUrl}
+                    playing={playing}
+                    controls={isHost}
+                    width="100%"
+                    height="100%"
+                    onPlay={handlePlay}
+                    onPause={handlePause}
+                    onSeek={(seconds) => handleSeek(seconds)}
+                  />
+                )
               ) : (
                 <div className="text-center p-8">
                   <Film className="w-16 h-16 text-spidey-red animate-pulse mx-auto mb-4" />
                   <p className="text-xl font-bold text-gray-300">No Stream Active</p>
                   <p className="text-sm text-gray-500 mt-1">
-                    {isHost ? 'Add a cloud file link below to start streaming.' : 'Waiting for host to play video...'}
+                    {isHost ? 'Paste a YouTube, Google Drive, or MP4 link below.' : 'Waiting for host to play video...'}
                   </p>
                 </div>
               )}
@@ -261,7 +302,7 @@ export default function App() {
                   type="url"
                   value={cloudInputUrl}
                   onChange={(e) => setCloudInputUrl(e.target.value)}
-                  placeholder="Paste direct Drive / TeraBox / MP4 stream link here..."
+                  placeholder="Paste YouTube, Drive, TeraBox, or MP4 link here..."
                   className="flex-1 bg-black/60 border border-gray-800 px-4 py-2 rounded-xl text-sm focus:outline-none focus:border-spidey-red"
                 />
                 <button 
