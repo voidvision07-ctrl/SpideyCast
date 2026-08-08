@@ -10,27 +10,26 @@ import { playSFX } from './utils/sfx';
 
 const socket = io('https://spideycast-backend.onrender.com');
 
-// STUN + Free OpenTURN Relay Servers (Required for Mobile / 4G / CGNAT)
+// STUN + Multi-Protocol TURN Relay Servers (Fixes infinite loading on Emulators & Mobile)
 const rtcConfig = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
     {
-      urls: 'turn:openrelay.metered.ca:80',
-      username: 'openrelayproject',
-      credential: 'openrelayproject'
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443',
-      username: 'openrelayproject',
-      credential: 'openrelayproject'
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      urls: [
+        'turn:openrelay.metered.ca:80?transport=udp',
+        'turn:openrelay.metered.ca:80?transport=tcp',
+        'turn:openrelay.metered.ca:443?transport=tcp',
+        'turns:openrelay.metered.ca:443?transport=tcp'
+      ],
       username: 'openrelayproject',
       credential: 'openrelayproject'
     }
-  ]
+  ],
+  iceCandidatePoolSize: 10
 };
 
 export default function App() {
@@ -88,13 +87,15 @@ export default function App() {
 
     pc.ontrack = (event) => {
       setIsSharingScreen(true);
-      const incomingStream = event.streams[0] || new MediaStream([event.track]);
+      const incomingStream = event.streams && event.streams[0] 
+        ? event.streams[0] 
+        : new MediaStream([event.track]);
 
       if (screenVideoRef.current) {
         screenVideoRef.current.srcObject = incomingStream;
         screenVideoRef.current.playsInline = true;
 
-        // Force muted play first for mobile autoplay compliance
+        // Mute first so mobile/emulator browser accepts video play
         screenVideoRef.current.muted = true; 
         
         const playPromise = screenVideoRef.current.play();
@@ -103,7 +104,8 @@ export default function App() {
             .then(() => {
               setNeedMobileTap(false);
             })
-            .catch(() => {
+            .catch((err) => {
+              console.log('Autoplay gesture required:', err);
               setNeedMobileTap(true);
             });
         }
@@ -122,9 +124,12 @@ export default function App() {
   const handleManualMobilePlay = () => {
     if (screenVideoRef.current) {
       screenVideoRef.current.muted = false;
-      screenVideoRef.current.play().then(() => {
-        setNeedMobileTap(false);
-      }).catch((e) => console.error("Mobile play error:", e));
+      screenVideoRef.current
+        .play()
+        .then(() => {
+          setNeedMobileTap(false);
+        })
+        .catch((e) => console.error("Mobile play error:", e));
     }
   };
 
