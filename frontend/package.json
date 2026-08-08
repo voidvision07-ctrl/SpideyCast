@@ -16,7 +16,6 @@
     "framer-motion": "^13.0.0",
     "howler": "^2.2.4",
     "lucide-react": "^1.30.0",
-    "peerjs": "^1.5.5",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-player": "^3.4.0",

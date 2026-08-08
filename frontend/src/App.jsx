@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef } from 'react';
 import ReactPlayer from 'react-player';
 import { io } from 'socket.io-client';
 import { motion } from 'framer-motion';
-import Peer from 'peerjs';
 import { 
   Send, Users, Tv, MessageSquare, Plus, LogIn, Film, Monitor, MonitorOff 
 } from 'lucide-react';
@@ -10,6 +9,13 @@ import Background3D from './components/Background3D';
 import { playSFX } from './utils/sfx';
 
 const socket = io('https://spideycast-backend.onrender.com');
+
+const rtcConfig = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' }
+  ]
+};
 
 export default function App() {
   // Navigation & Auth State
@@ -33,10 +39,10 @@ export default function App() {
   // WebRTC Screen Share State
   const [isSharingScreen, setIsSharingScreen] = useState(false);
   const screenVideoRef = useRef(null);
-  const peerInstance = useRef(null);
   const localStreamRef = useRef(null);
+  const peerConnections = useRef({});
+  const iceCandidatesQueue = useRef({});
 
-  // Helper function to safely get current player time
   const getPlayerTime = () => {
     if (!playerRef.current) return 0;
     if (typeof playerRef.current.getCurrentTime === 'function') {
@@ -48,28 +54,64 @@ export default function App() {
     return 0;
   };
 
-  useEffect(() => {
-    // Initialize PeerJS instance for P2P connection
-    const peer = new Peer();
-    peerInstance.current = peer;
+  const createPeerConnection = (targetId) => {
+    if (peerConnections.current[targetId]) {
+      peerConnections.current[targetId].close();
+    }
 
-    // Listen for incoming calls (for Guest devices receiving stream)
-    peer.on('call', (call) => {
-      call.answer(); // Answer incoming stream call
-      call.on('stream', (remoteStream) => {
-        setIsSharingScreen(true);
-        if (screenVideoRef.current) {
-          screenVideoRef.current.srcObject = remoteStream;
-        }
+    const pc = new RTCPeerConnection(rtcConfig);
+    peerConnections.current[targetId] = pc;
+    iceCandidatesQueue.current[targetId] = [];
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        socket.emit('webrtc_ice', { candidate: event.candidate, targetId });
+      }
+    };
+
+    pc.ontrack = (event) => {
+      setIsSharingScreen(true);
+      const stream = event.streams[0] || new MediaStream([event.track]);
+
+      if (screenVideoRef.current) {
+        screenVideoRef.current.srcObject = stream;
+        screenVideoRef.current.play().catch(() => {
+          if (screenVideoRef.current) {
+            screenVideoRef.current.muted = true;
+            screenVideoRef.current.play();
+          }
+        });
+      }
+    };
+
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => {
+        pc.addTrack(track, localStreamRef.current);
       });
-    });
+    }
 
-    // Socket Event Listeners
+    return pc;
+  };
+
+  const processQueuedCandidates = async (senderId, pc) => {
+    const queue = iceCandidatesQueue.current[senderId] || [];
+    while (queue.length > 0) {
+      const candidate = queue.shift();
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (e) {
+        console.error('Error processing candidate:', e);
+      }
+    }
+  };
+
+  useEffect(() => {
     socket.on('room_update', (room) => {
       setMembers(room.members);
-      if (room.videoState?.url && !videoUrl) {
+      if (room.videoState?.url) {
         setVideoUrl(room.videoState.url);
       }
+      setIsSharingScreen(room.isSharingScreen);
     });
 
     socket.on('receive_message', (msg) => {
@@ -95,20 +137,52 @@ export default function App() {
       }
     });
 
-    // Peer Screen Share Socket Events
-    socket.on('screen_share_started', ({ hostPeerId }) => {
-      setIsSharingScreen(true);
-      // Connect to Host's Peer ID to get video feed
-      if (peerInstance.current && hostPeerId) {
-        const call = peerInstance.current.call(hostPeerId, null);
-        if (call) {
-          call.on('stream', (remoteStream) => {
-            if (screenVideoRef.current) {
-              screenVideoRef.current.srcObject = remoteStream;
-            }
-          });
-        }
+    socket.on('request_stream', async ({ requesterId }) => {
+      if (localStreamRef.current) {
+        const pc = createPeerConnection(requesterId);
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit('webrtc_offer', { offer, targetId: requesterId });
       }
+    });
+
+    socket.on('webrtc_offer', async ({ offer, senderId }) => {
+      const pc = createPeerConnection(senderId);
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      socket.emit('webrtc_answer', { answer, targetId: senderId });
+
+      await processQueuedCandidates(senderId, pc);
+    });
+
+    socket.on('webrtc_answer', async ({ answer, senderId }) => {
+      const pc = peerConnections.current[senderId];
+      if (pc) {
+        await pc.setRemoteDescription(new RTCSessionDescription(answer));
+        await processQueuedCandidates(senderId, pc);
+      }
+    });
+
+    socket.on('webrtc_ice', async ({ candidate, senderId }) => {
+      const pc = peerConnections.current[senderId];
+      if (pc && pc.remoteDescription) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (e) {
+          console.error('Error adding ICE candidate:', e);
+        }
+      } else {
+        if (!iceCandidatesQueue.current[senderId]) {
+          iceCandidatesQueue.current[senderId] = [];
+        }
+        iceCandidatesQueue.current[senderId].push(candidate);
+      }
+    });
+
+    socket.on('screen_share_started', ({ hostId }) => {
+      setIsSharingScreen(true);
+      socket.emit('request_stream', { hostId });
     });
 
     socket.on('screen_share_stopped', () => {
@@ -116,18 +190,24 @@ export default function App() {
       if (screenVideoRef.current) {
         screenVideoRef.current.srcObject = null;
       }
+      Object.values(peerConnections.current).forEach((pc) => pc.close());
+      peerConnections.current = {};
+      iceCandidatesQueue.current = {};
     });
 
     return () => {
-      peer.destroy();
       socket.off('room_update');
       socket.off('receive_message');
       socket.off('video_source_changed');
       socket.off('apply_video_action');
+      socket.off('request_stream');
+      socket.off('webrtc_offer');
+      socket.off('webrtc_answer');
+      socket.off('webrtc_ice');
       socket.off('screen_share_started');
       socket.off('screen_share_stopped');
     };
-  }, [videoUrl]);
+  }, []);
 
   // Handlers
   const handleCreateRoom = () => {
@@ -148,6 +228,10 @@ export default function App() {
       if (res.success) {
         setIsHost(res.isHost);
         setInRoom(true);
+        if (res.isSharingScreen && res.hostId) {
+          setIsSharingScreen(true);
+          socket.emit('request_stream', { hostId: res.hostId });
+        }
       } else alert(res.message);
     });
   };
@@ -192,7 +276,6 @@ export default function App() {
     setCloudInputUrl('');
   };
 
-  // WebRTC Screen Share Functions
   const startScreenShare = async () => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
@@ -205,24 +288,16 @@ export default function App() {
 
       if (screenVideoRef.current) {
         screenVideoRef.current.srcObject = stream;
+        screenVideoRef.current.play();
       }
 
-      // Notify peer connections when called
-      peerInstance.current.on('call', (call) => {
-        call.answer(stream);
-      });
-
-      // Send host Peer ID to all room members
-      socket.emit('start_screen_share', { 
-        roomId, 
-        hostPeerId: peerInstance.current.id 
-      });
+      socket.emit('start_screen_share', { roomId });
 
       stream.getVideoTracks()[0].onended = () => {
         stopScreenShare();
       };
     } catch (err) {
-      console.error("Screen share failed:", err);
+      console.error("Screen share cancelled:", err);
     }
   };
 
@@ -235,7 +310,6 @@ export default function App() {
     socket.emit('stop_screen_share', { roomId });
   };
 
-  // Video Actions Sync
   const handlePlay = () => {
     setPlaying(true);
     if (isHost) {
@@ -270,7 +344,6 @@ export default function App() {
     <div className="relative min-h-screen bg-spidey-dark text-white flex flex-col font-sans overflow-hidden">
       <Background3D />
 
-      {/* Header */}
       <header className="relative z-10 flex items-center justify-between px-8 py-4 bg-spidey-card/60 backdrop-blur-md border-b border-spidey-red/20">
         <motion.div 
           initial={{ x: -50, opacity: 0 }}
@@ -294,7 +367,6 @@ export default function App() {
         )}
       </header>
 
-      {/* Main Content View */}
       {!inRoom ? (
         <main className="relative z-10 flex-1 flex items-center justify-center p-6">
           <motion.div 
@@ -364,21 +436,20 @@ export default function App() {
         </main>
       ) : (
         <main className="relative z-10 flex-1 grid grid-cols-1 lg:grid-cols-4 gap-6 p-6 h-[calc(100vh-80px)]">
-          {/* VIDEO STAGE */}
           <section className="lg:col-span-3 flex flex-col space-y-4">
             <div className="relative flex-1 bg-black/80 rounded-3xl border border-spidey-red/30 overflow-hidden shadow-2xl flex items-center justify-center min-h-[400px]">
               
-              {isSharingScreen ? (
-                /* Mobile & Desktop Native WebRTC Player */
-                <video
-                  ref={screenVideoRef}
-                  autoPlay
-                  playsInline
-                  muted={isHost} // Mute for host locally to prevent echo
-                  controls={!isHost}
-                  className="w-full h-full object-contain"
-                />
-              ) : videoUrl ? (
+              {/* Always mounted video element to prevent DOM Abort errors */}
+              <video
+                ref={screenVideoRef}
+                autoPlay
+                playsInline
+                muted={isHost}
+                controls={!isHost}
+                className={`w-full h-full object-contain bg-black ${isSharingScreen ? 'block' : 'hidden'}`}
+              />
+
+              {!isSharingScreen && videoUrl && (
                 isEmbedUrl ? (
                   <div className="relative w-full h-full">
                     {!isHost && (
@@ -407,7 +478,9 @@ export default function App() {
                     onSeek={(seconds) => handleSeek(seconds)}
                   />
                 )
-              ) : (
+              )}
+
+              {!isSharingScreen && !videoUrl && (
                 <div className="text-center p-8">
                   <Film className="w-16 h-16 text-spidey-red animate-pulse mx-auto mb-4" />
                   <p className="text-xl font-bold text-gray-300">No Stream Active</p>
@@ -418,7 +491,6 @@ export default function App() {
               )}
             </div>
 
-            {/* HOST CONTROLLER PANEL */}
             {isHost && (
               <div className="flex flex-col md:flex-row space-y-3 md:space-y-0 md:space-x-3 bg-spidey-card/90 p-4 rounded-2xl border border-spidey-red/30">
                 <form onSubmit={handleSetCloudVideo} className="flex-1 flex space-x-2">
@@ -459,7 +531,6 @@ export default function App() {
             )}
           </section>
 
-          {/* SIDE PANEL */}
           <aside className="flex flex-col space-y-4 h-full overflow-hidden">
             <div className="bg-spidey-card/80 p-4 rounded-2xl border border-spidey-red/20 backdrop-blur-md">
               <div className="flex items-center space-x-2 text-xs font-bold text-spidey-cyan mb-3 uppercase tracking-wider">
