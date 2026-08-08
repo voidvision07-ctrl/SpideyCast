@@ -3,18 +3,34 @@ import ReactPlayer from 'react-player';
 import { io } from 'socket.io-client';
 import { motion } from 'framer-motion';
 import { 
-  Send, Users, Tv, MessageSquare, Plus, LogIn, Film, Monitor, MonitorOff 
+  Send, Users, Tv, MessageSquare, Plus, LogIn, Film, Monitor, MonitorOff, Volume2 
 } from 'lucide-react';
 import Background3D from './components/Background3D';
 import { playSFX } from './utils/sfx';
 
-// Socket connection
 const socket = io('https://spideycast-backend.onrender.com');
 
+// STUN + Free OpenTURN Relay Servers (Required for Mobile / 4G / CGNAT)
 const rtcConfig = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' }
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:openrelay.metered.ca:80' },
+    {
+      urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelay',
+      credential: 'openrelay'
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443',
+      username: 'openrelay',
+      credential: 'openrelay'
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelay',
+      credential: 'openrelay'
+    }
   ]
 };
 
@@ -39,6 +55,7 @@ export default function App() {
 
   // WebRTC Screen Share State
   const [isSharingScreen, setIsSharingScreen] = useState(false);
+  const [needMobileTap, setNeedMobileTap] = useState(false);
   const screenVideoRef = useRef(null);
   const localStreamRef = useRef(null);
   const peerConnections = useRef({});
@@ -78,15 +95,18 @@ export default function App() {
         screenVideoRef.current.srcObject = incomingStream;
         screenVideoRef.current.playsInline = true;
 
+        // Force muted play first for mobile autoplay compliance
+        screenVideoRef.current.muted = true; 
+        
         const playPromise = screenVideoRef.current.play();
         if (playPromise !== undefined) {
-          playPromise.catch((error) => {
-            console.warn("Mobile autoplay blocked, muting video to force playback:", error);
-            if (screenVideoRef.current) {
-              screenVideoRef.current.muted = true;
-              screenVideoRef.current.play();
-            }
-          });
+          playPromise
+            .then(() => {
+              setNeedMobileTap(false);
+            })
+            .catch(() => {
+              setNeedMobileTap(true);
+            });
         }
       }
     };
@@ -98,6 +118,15 @@ export default function App() {
     }
 
     return pc;
+  };
+
+  const handleManualMobilePlay = () => {
+    if (screenVideoRef.current) {
+      screenVideoRef.current.muted = false;
+      screenVideoRef.current.play().then(() => {
+        setNeedMobileTap(false);
+      }).catch((e) => console.error("Mobile play error:", e));
+    }
   };
 
   const processQueuedCandidates = async (senderId, pc) => {
@@ -194,6 +223,7 @@ export default function App() {
 
     socket.on('screen_share_stopped', () => {
       setIsSharingScreen(false);
+      setNeedMobileTap(false);
       if (screenVideoRef.current) {
         screenVideoRef.current.srcObject = null;
       }
@@ -455,6 +485,16 @@ export default function App() {
                 controls={!isHost}
                 className={`w-full h-full object-contain bg-black ${isSharingScreen ? 'block' : 'hidden'}`}
               />
+
+              {isSharingScreen && needMobileTap && !isHost && (
+                <button 
+                  onClick={handleManualMobilePlay}
+                  className="absolute z-30 px-6 py-3 bg-spidey-red text-white font-bold rounded-2xl shadow-2xl flex items-center space-x-2 animate-bounce"
+                >
+                  <Volume2 className="w-5 h-5" />
+                  <span>Tap to Start Stream</span>
+                </button>
+              )}
 
               {!isSharingScreen && videoUrl && (
                 isEmbedUrl ? (
