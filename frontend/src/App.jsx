@@ -8,6 +8,7 @@ import {
 import Background3D from './components/Background3D';
 import { playSFX } from './utils/sfx';
 
+// Socket connection
 const socket = io('https://spideycast-backend.onrender.com');
 
 const rtcConfig = {
@@ -71,16 +72,22 @@ export default function App() {
 
     pc.ontrack = (event) => {
       setIsSharingScreen(true);
-      const stream = event.streams[0] || new MediaStream([event.track]);
+      const incomingStream = event.streams[0] || new MediaStream([event.track]);
 
       if (screenVideoRef.current) {
-        screenVideoRef.current.srcObject = stream;
-        screenVideoRef.current.play().catch(() => {
-          if (screenVideoRef.current) {
-            screenVideoRef.current.muted = true;
-            screenVideoRef.current.play();
-          }
-        });
+        screenVideoRef.current.srcObject = incomingStream;
+        screenVideoRef.current.playsInline = true;
+
+        const playPromise = screenVideoRef.current.play();
+        if (playPromise !== undefined) {
+          playPromise.catch((error) => {
+            console.warn("Mobile autoplay blocked, muting video to force playback:", error);
+            if (screenVideoRef.current) {
+              screenVideoRef.current.muted = true;
+              screenVideoRef.current.play();
+            }
+          });
+        }
       }
     };
 
@@ -439,11 +446,11 @@ export default function App() {
           <section className="lg:col-span-3 flex flex-col space-y-4">
             <div className="relative flex-1 bg-black/80 rounded-3xl border border-spidey-red/30 overflow-hidden shadow-2xl flex items-center justify-center min-h-[400px]">
               
-              {/* Always mounted video element to prevent DOM Abort errors */}
               <video
                 ref={screenVideoRef}
                 autoPlay
                 playsInline
+                webkit-playsinline="true"
                 muted={isHost}
                 controls={!isHost}
                 className={`w-full h-full object-contain bg-black ${isSharingScreen ? 'block' : 'hidden'}`}
