@@ -10,20 +10,17 @@ import { playSFX } from './utils/sfx';
 
 const socket = io('https://spideycast-backend.onrender.com');
 
-// STUN + Multi-Protocol TURN Relay Servers (Fixes infinite loading on Emulators & Mobile)
+// Multi-Protocol TURN/STUN configuration
 const rtcConfig = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
     {
       urls: [
         'turn:openrelay.metered.ca:80?transport=udp',
         'turn:openrelay.metered.ca:80?transport=tcp',
-        'turn:openrelay.metered.ca:443?transport=tcp',
-        'turns:openrelay.metered.ca:443?transport=tcp'
+        'turn:openrelay.metered.ca:443?transport=tcp'
       ],
       username: 'openrelayproject',
       credential: 'openrelayproject'
@@ -94,8 +91,6 @@ export default function App() {
       if (screenVideoRef.current) {
         screenVideoRef.current.srcObject = incomingStream;
         screenVideoRef.current.playsInline = true;
-
-        // Mute first so mobile/emulator browser accepts video play
         screenVideoRef.current.muted = true; 
         
         const playPromise = screenVideoRef.current.play();
@@ -105,7 +100,7 @@ export default function App() {
               setNeedMobileTap(false);
             })
             .catch((err) => {
-              console.log('Autoplay gesture required:', err);
+              console.log('Autoplay blocked:', err);
               setNeedMobileTap(true);
             });
         }
@@ -121,15 +116,16 @@ export default function App() {
     return pc;
   };
 
-  const handleManualMobilePlay = () => {
+  const handleManualMobilePlay = async () => {
     if (screenVideoRef.current) {
-      screenVideoRef.current.muted = false;
-      screenVideoRef.current
-        .play()
-        .then(() => {
-          setNeedMobileTap(false);
-        })
-        .catch((e) => console.error("Mobile play error:", e));
+      try {
+        screenVideoRef.current.muted = true;
+        await screenVideoRef.current.play();
+        screenVideoRef.current.muted = false;
+        setNeedMobileTap(false);
+      } catch (e) {
+        console.error("Play error:", e);
+      }
     }
   };
 
@@ -140,7 +136,7 @@ export default function App() {
       try {
         await pc.addIceCandidate(new RTCIceCandidate(candidate));
       } catch (e) {
-        console.error('Error processing candidate:', e);
+        console.error('Candidate error:', e);
       }
     }
   };
@@ -210,7 +206,7 @@ export default function App() {
         try {
           await pc.addIceCandidate(new RTCIceCandidate(candidate));
         } catch (e) {
-          console.error('Error adding ICE candidate:', e);
+          console.error('ICE candidate error:', e);
         }
       } else {
         if (!iceCandidatesQueue.current[senderId]) {
@@ -250,7 +246,6 @@ export default function App() {
     };
   }, []);
 
-  // Handlers
   const handleCreateRoom = () => {
     if (!roomId || !password || !username) return alert('Fill all fields!');
     playSFX.click();
